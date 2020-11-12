@@ -15,6 +15,7 @@
 #include <X11/extensions/Xinerama.h>
 #endif
 #include <X11/Xft/Xft.h>
+#include <X11/Xresource.h>
 
 #include "drw.h"
 #include "util.h"
@@ -24,6 +25,8 @@
                              * MAX(0, MIN((y)+(h),(r).y_org+(r).height) - MAX((y),(r).y_org)))
 #define LENGTH(X)             (sizeof X / sizeof X[0])
 #define TEXTW(X)              (drw_fontset_getwidth(drw, (X)) + lrpad)
+#define NUMBERSMAXDIGITS      100
+#define NUMBERSBUFSIZE        (NUMBERSMAXDIGITS * 2) + 1
 
 /* enums */
 enum { SchemeNorm, SchemeSel, SchemeOut, SchemeLast }; /* color schemes */
@@ -34,6 +37,7 @@ struct item {
 	int out;
 };
 
+static char numbers[NUMBERSBUFSIZE] = "";
 static char text[BUFSIZ] = "";
 static char *embed;
 static int bh, mw, mh;
@@ -52,6 +56,10 @@ static XIC xic;
 
 static Drw *drw;
 static Clr *scheme[SchemeLast];
+
+/* Temporary arrays to allow overriding xresources values */
+static char *colortemp[4];
+static char *tempfonts;
 
 #include "config.h"
 
@@ -136,6 +144,21 @@ drawitem(struct item *item, int x, int y, int w)
 }
 
 static void
+recalculatenumbers()
+{
+	unsigned int numer = 0, denom = 0;
+	struct item *item;
+	if (matchend) {
+		numer++;
+		for (item = matchend; item && item->left; item = item->left)
+			numer++;
+	}
+	for (item = items; item && item->text; item++)
+		denom++;
+	snprintf(numbers, NUMBERSBUFSIZE, "%d/%d", numer, denom);
+}
+
+static void
 drawmenu(void)
 {
 	unsigned int curpos;
@@ -157,9 +180,10 @@ drawmenu(void)
 	curpos = TEXTW(text) - TEXTW(&text[cursor]);
 	if ((curpos += lrpad / 2 - 1) < w) {
 		drw_setscheme(drw, scheme[SchemeNorm]);
-		drw_rect(drw, x + curpos, 2 + (bh-fh)/2, 2, fh - 4, 1, 0);
+		drw_rect(drw, x + curpos, 2 + (bh - fh) / 2, 2, fh - 4, 1, 0);
 	}
 
+	recalculatenumbers();
 	if (lines > 0) {
 		/* draw vertical list */
 		for (item = curr; item != next; item = item->right)
@@ -174,13 +198,15 @@ drawmenu(void)
 		}
 		x += w;
 		for (item = curr; item != next; item = item->right)
-			x = drawitem(item, x, 0, MIN(TEXTW(item->text), mw - x - TEXTW(">")));
+			x = drawitem(item, x, 0, MIN(TEXTW(item->text), mw - x - TEXTW(">") - TEXTW(numbers)));
 		if (next) {
 			w = TEXTW(">");
 			drw_setscheme(drw, scheme[SchemeNorm]);
-			drw_text(drw, mw - w, 0, w, bh, lrpad / 2, ">", 0);
+			drw_text(drw, mw - w - TEXTW(numbers), 0, w, bh, lrpad / 2, ">", 0);
 		}
 	}
+	drw_setscheme(drw, scheme[SchemeNorm]);
+	drw_text(drw, mw - TEXTW(numbers), 0, TEXTW(numbers), bh, lrpad / 2, numbers, 0);
 	drw_map(drw, win, 0, 0, mw, mh);
 }
 
@@ -473,7 +499,20 @@ insert:
 		break;
 	case XK_Return:
 	case XK_KP_Enter:
-		puts((sel && !(ev->state & ShiftMask)) ? sel->text : text);
+    if ((sel && !(ev->state & ShiftMask))) {
+      if (sel->text[0] == startpipe[0]) {
+        strncpy(sel->text + strlen(sel->text),pipe,8);
+        puts(sel->text+1);
+      }
+        puts(sel->text);
+    }
+    else {
+      if (text[0] == startpipe[0]) {
+        strncpy(text + strlen(text),pipe,8);
+        puts(text+1);
+      }
+        puts(text);
+    }
 		if (!(ev->state & ControlMask)) {
 			cleanup();
 			exit(0);
@@ -610,8 +649,13 @@ setup(void)
 	int a, di, n, area = 0;
 #endif
 	/* init appearance */
-	for (j = 0; j < SchemeLast; j++)
-		scheme[j] = drw_scm_create(drw, colors[j], 2);
+	for (j = 0; j < SchemeLast; j++) {
+		scheme[j] = drw_scm_create(drw, (const char**)colors[j], 2);
+	}
+	for (j = 0; j < SchemeOut; ++j) {
+		for (i = 0; i < 2; ++i)
+			free(colors[j][i]);
+	}
 
 	clip = XInternAtom(dpy, "CLIPBOARD",   False);
 	utf8 = XInternAtom(dpy, "UTF8_STRING", False);
@@ -700,10 +744,44 @@ setup(void)
 static void
 usage(void)
 {
-	fputs("usage: dmenu [-bfiv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
-	      "             [-h height]\n"
+	fputs("usage: dmenu [-bfiv] [-l lines] [-h height] [-p prompt] [-fn font] [-m monitor]\n"
 	      "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n", stderr);
 	exit(1);
+}
+
+void
+readxresources(void) {
+	XrmInitialize();
+
+	char* xrm;
+	if ((xrm = XResourceManagerString(drw->dpy))) {
+		char *type;
+		XrmDatabase xdb = XrmGetStringDatabase(xrm);
+		XrmValue xval;
+
+		if (XrmGetResource(xdb, "dmenu.font", "*", &type, &xval))
+			fonts[0] = strdup(xval.addr);
+		else
+			fonts[0] = strdup(fonts[0]);
+		if (XrmGetResource(xdb, "dmenu.background", "*", &type, &xval))
+			colors[SchemeNorm][ColBg] = strdup(xval.addr);
+		else
+			colors[SchemeNorm][ColBg] = strdup(colors[SchemeNorm][ColBg]);
+		if (XrmGetResource(xdb, "dmenu.foreground", "*", &type, &xval))
+			colors[SchemeNorm][ColFg] = strdup(xval.addr);
+		else
+			colors[SchemeNorm][ColFg] = strdup(colors[SchemeNorm][ColFg]);
+		if (XrmGetResource(xdb, "dmenu.selbackground", "*", &type, &xval))
+			colors[SchemeSel][ColBg] = strdup(xval.addr);
+		else
+			colors[SchemeSel][ColBg] = strdup(colors[SchemeSel][ColBg]);
+		if (XrmGetResource(xdb, "dmenu.selforeground", "*", &type, &xval))
+			colors[SchemeSel][ColFg] = strdup(xval.addr);
+		else
+			colors[SchemeSel][ColFg] = strdup(colors[SchemeSel][ColFg]);
+
+		XrmDestroyDatabase(xdb);
+	}
 }
 
 int
@@ -729,24 +807,24 @@ main(int argc, char *argv[])
 		/* these options take one argument */
 		else if (!strcmp(argv[i], "-l"))   /* number of lines in vertical list */
 			lines = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "-h")) { /* minimum height of one menu line */
+			lineheight = atoi(argv[++i]);
+			lineheight = MAX(lineheight, min_lineheight);
+		}
 		else if (!strcmp(argv[i], "-m"))
 			mon = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "-p"))   /* adds prompt to left of input field */
 			prompt = argv[++i];
 		else if (!strcmp(argv[i], "-fn"))  /* font or font set */
-			fonts[0] = argv[++i];
-		else if(!strcmp(argv[i], "-h")) { /* minimum height of one menu line */
-			lineheight = atoi(argv[++i]);
-			lineheight = MAX(lineheight,8); /* reasonable default in case of value too small/negative */
-		}
+			tempfonts = argv[++i];
 		else if (!strcmp(argv[i], "-nb"))  /* normal background color */
-			colors[SchemeNorm][ColBg] = argv[++i];
+			colortemp[0] = argv[++i];
 		else if (!strcmp(argv[i], "-nf"))  /* normal foreground color */
-			colors[SchemeNorm][ColFg] = argv[++i];
+			colortemp[1] = argv[++i];
 		else if (!strcmp(argv[i], "-sb"))  /* selected background color */
-			colors[SchemeSel][ColBg] = argv[++i];
+			colortemp[2] = argv[++i];
 		else if (!strcmp(argv[i], "-sf"))  /* selected foreground color */
-			colors[SchemeSel][ColFg] = argv[++i];
+			colortemp[3] = argv[++i];
 		else if (!strcmp(argv[i], "-w"))   /* embedding window id */
 			embed = argv[++i];
 		else
@@ -764,8 +842,23 @@ main(int argc, char *argv[])
 		die("could not get embedding window attributes: 0x%lx",
 		    parentwin);
 	drw = drw_create(dpy, screen, root, wa.width, wa.height);
-	if (!drw_fontset_create(drw, fonts, LENGTH(fonts)))
+	readxresources();
+	/* Now we check whether to override xresources with commandline parameters */
+	if ( tempfonts )
+	   fonts[0] = strdup(tempfonts);
+	if ( colortemp[0])
+	   colors[SchemeNorm][ColBg] = strdup(colortemp[0]);
+	if ( colortemp[1])
+	   colors[SchemeNorm][ColFg] = strdup(colortemp[1]);
+	if ( colortemp[2])
+	   colors[SchemeSel][ColBg]  = strdup(colortemp[2]);
+	if ( colortemp[3])
+	   colors[SchemeSel][ColFg]  = strdup(colortemp[3]);
+
+	if (!drw_fontset_create(drw, (const char**)fonts, LENGTH(fonts)))
 		die("no fonts could be loaded.");
+
+	free(fonts[0]);
 	lrpad = drw->fonts->h;
 
 #ifdef __OpenBSD__
