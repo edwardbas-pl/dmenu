@@ -3,6 +3,8 @@
 
 static int topbar = 1;                      /* -b  option; if 0, dmenu appears at bottom     */
 static unsigned int border_width = 5;
+static unsigned int min_lineheight = 14;
+static unsigned int lineheight = 24;
 /* -fn option overrides fonts[0]; default X11 font or font set */
 static const char *fonts[] = {
 	"monospace:size=10"
